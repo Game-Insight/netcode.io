@@ -70,13 +70,14 @@ pub struct ConnectToken {
     pub sequence: u64,
     /// Private data encryped with server's private key(separate from client <-> server keys).
     pub private_data: [u8; NETCODE_CONNECT_TOKEN_PRIVATE_BYTES],
+    /// Time in seconds connection should wait before disconnecting
+    pub timeout_sec: u32,
     /// List of hosts this token supports connecting to.
     pub hosts: HostList,
     /// Private key for client -> server communcation.
     pub client_to_server_key: [u8; NETCODE_KEY_BYTES],
     /// Private key for server -> client communcation.
     pub server_to_client_key: [u8; NETCODE_KEY_BYTES],
-    /// Time in seconds zzz
 }
 
 impl Clone for ConnectToken {
@@ -87,10 +88,10 @@ impl Clone for ConnectToken {
             expire_utc: self.expire_utc,
             sequence: self.sequence,
             private_data: self.private_data,
+            timeout_sec: self.timeout_sec,
             hosts: self.hosts.clone(),
             client_to_server_key: self.client_to_server_key,
             server_to_client_key: self.server_to_client_key,
-            timeout_sec: self.timeout_sec
         }
     }
 }
@@ -99,6 +100,8 @@ impl Clone for ConnectToken {
 pub struct PrivateData {
     /// Unique client id, determined by the server.
     pub client_id: u64,
+    /// Time in seconds connection should wait before disconnecting
+    pub timeout_sec: u32,
     /// Secondary host list to authoritatively determine which hosts clients can connect to.
     pub hosts: HostList,
     /// Private key for client -> server communcation.
@@ -233,9 +236,9 @@ impl ConnectToken {
             protocol: protocol,
             sequence: sequence,
             private_data: private_data,
+            timeout_sec: NETCODE_TIMEOUT_SECONDS,
             client_to_server_key: decoded_data.client_to_server_key,
             server_to_client_key: decoded_data.server_to_client_key,
-            timeout_sec: NETCODE_TIMEOUT_SECONDS
         })
     }
 
@@ -254,10 +257,10 @@ impl ConnectToken {
         out.write_u64::<LittleEndian>(self.expire_utc)?;
         out.write_u64::<LittleEndian>(self.sequence)?;
         out.write(&self.private_data)?;
+        out.write_u32::<LittleEndian>(self.timeout_sec)?;
         self.hosts.write(out)?;
         out.write(&self.client_to_server_key)?;
         out.write(&self.server_to_client_key)?;
-        out.write_u32::<LittleEndian>(self.timeout_sec)?;
 
         Ok(())
     }
@@ -280,6 +283,8 @@ impl ConnectToken {
         let mut private_data = [0; NETCODE_CONNECT_TOKEN_PRIVATE_BYTES];
         source.read_exact(&mut private_data)?;
 
+        let timeout_sec = source.read_u32::<LittleEndian>()?;
+
         let hosts = HostList::read(source)?;
 
         let mut client_to_server_key = [0; NETCODE_KEY_BYTES];
@@ -288,18 +293,16 @@ impl ConnectToken {
         let mut server_to_client_key = [0; NETCODE_KEY_BYTES];
         source.read_exact(&mut server_to_client_key)?;
 
-        let timeout_sec = source.read_u32::<LittleEndian>()?;
-
         Ok(ConnectToken {
-            hosts: hosts,
-            create_utc: create_utc,
-            expire_utc: expire_utc,
-            protocol: protocol,
-            sequence: sequence,
-            private_data: private_data,
-            client_to_server_key: client_to_server_key,
-            server_to_client_key: server_to_client_key,
-            timeout_sec: timeout_sec
+            hosts,
+            create_utc,
+            expire_utc,
+            protocol,
+            sequence,
+            private_data,
+            timeout_sec,
+            client_to_server_key,
+            server_to_client_key,
         })
     }
 }
@@ -320,6 +323,7 @@ impl PrivateData {
 
         PrivateData {
             client_id: client_id,
+            timeout_sec: NETCODE_TIMEOUT_SECONDS,
             hosts: HostList::new(hosts),
             user_data: final_user_data,
             client_to_server_key: client_to_server_key,
@@ -360,6 +364,7 @@ impl PrivateData {
 
     fn write<W>(&self, out: &mut W) -> Result<(), io::Error> where W: io::Write {
         out.write_u64::<LittleEndian>(self.client_id)?;
+        out.write_u32::<LittleEndian>(self.timeout_sec)?;
 
         self.hosts.write(out)?;
         out.write(&self.client_to_server_key)?;
@@ -372,6 +377,7 @@ impl PrivateData {
 
     fn read<R>(source: &mut R) -> Result<PrivateData, io::Error> where R: io::Read {
         let client_id = source.read_u64::<LittleEndian>()?;
+        let timeout_sec = source.read_u32::<LittleEndian>()?;
         let hosts = HostList::read(source)?;
 
         let mut client_to_server_key = [0; NETCODE_KEY_BYTES];
@@ -384,11 +390,12 @@ impl PrivateData {
         source.read_exact(&mut user_data)?;
 
         Ok(PrivateData {
-            hosts: hosts,
-            client_id: client_id,
-            client_to_server_key: client_to_server_key,
-            server_to_client_key: server_to_client_key,
-            user_data: user_data
+            hosts,
+            timeout_sec,
+            client_id,
+            client_to_server_key,
+            server_to_client_key,
+            user_data
         })
     }
 }
@@ -606,8 +613,10 @@ fn capi_connect_token<I>(hosts: I, private_key: &[u8; NETCODE_KEY_BYTES], expire
 
     let result = unsafe {
         match capi::netcode_generate_connect_token(host_count,
-            host_list_ptr.as_ptr() as *mut *mut i8,
+            host_list_ptr.as_ptr() as *mut *const i8,
+            host_list_ptr.as_ptr() as *mut *const i8,
             expire,
+            NETCODE_TIMEOUT_SECONDS as i32,
             client_id,
             protocol,
             sequence,
@@ -696,6 +705,7 @@ fn interop_write() {
         
         assert_eq!(output.sequence, sequence);
         assert_eq!(output.expire_timestamp, output.create_timestamp + expire as u64);
+        assert_eq!(output.timeout_seconds, NETCODE_TIMEOUT_SECONDS as i32);
         assert_eq!(output.protocol_id, protocol);
     }
 }
